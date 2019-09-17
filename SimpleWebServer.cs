@@ -8,11 +8,12 @@ namespace zhusmelb.NetLib.Http
     using System.Threading.Tasks;
 
     public delegate void RequestReceivedHandler(NameObjectCollectionBase request);
+    public delegate void SimpleWebServerErrorHandhler(Exception ex);
     public class SimpleWebServer
     {
         private SimpleWebServerOption _options;
         public event RequestReceivedHandler RequestReceived;
-
+        public event SimpleWebServerErrorHandhler ServerExceptionThrown;
         public SimpleWebServer(SimpleWebServerOption options)
         {
             _options = options ?? throw new ArgumentNullException(nameof(options));
@@ -22,33 +23,44 @@ namespace zhusmelb.NetLib.Http
         public Task StartAsync(CancellationToken cancellation) 
         {
             return Task.Run(async () => {
-                var listener = new HttpListener();
                 if (_options.Prefixes==null || _options.Prefixes.Count==0)
                     throw new InvalidOperationException("No Prefix set");
-                    
+
+                var listener = new HttpListener();
                 foreach (var p in _options.Prefixes)
                     listener.Prefixes.Add(p);
                 try
                 {
                     listener.Start();
                     HttpListenerContext context = await listener.GetContextAsync();
+                    cancellation.ThrowIfCancellationRequested();
                     HttpListenerRequest request = context.Request;
-
                     OnRequestReceived(request.QueryString);
-
-                    listener.Stop();
-                    listener.Close();
                 }
-                catch (HttpListenerException lnEx)
+                catch (OperationCanceledException ex) {
+                    if (!cancellation.IsCancellationRequested)
+                        OnServerExceptionThrown(ex);
+                    throw;  // cancellation token, not an error
+                }
+                catch (Exception ex)
                 {
-                    var code = lnEx.ErrorCode;
+                    OnServerExceptionThrown(ex);
+                    throw;
+                }
+                finally {
+                    if (listener.IsListening) 
+                        listener.Stop();
+                    listener.Close();
                 }
             }, cancellation);
         }
         protected virtual void OnRequestReceived(NameObjectCollectionBase request)
+            => invokeEventHandler(RequestReceived, request);
+        protected virtual void OnServerExceptionThrown(Exception ex) 
+            => invokeEventHandler(ServerExceptionThrown, ex);
+        private void invokeEventHandler(MulticastDelegate e, params object[] args) 
         {
-            var args = new[] { (object)request };
-            foreach (var d in RequestReceived.GetInvocationList())
+            foreach (var d in e.GetInvocationList())
             {
                 var syncer = d.Target as ISynchronizeInvoke;
                 if (syncer != null && syncer.InvokeRequired)
@@ -56,8 +68,7 @@ namespace zhusmelb.NetLib.Http
                 else
                     d.DynamicInvoke(args);
             }
-        }
 
-        
+        }
     }
 }
